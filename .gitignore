@@ -1,0 +1,25 @@
+# Personal data — never commit these
+data/profiles/
+data/category_tree.json
+
+# Python
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Test/scratch files
+main.py
+pandas_test.py
+file_test.py
+regex_test.py
+migrate.py
+migrate_to_profiles.py
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Streamlit
+.streamlit/
