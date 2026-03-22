@@ -110,52 +110,32 @@ with tab1:
     else:
         st.subheader("Übersicht")
 
-        num_months = df["date"].dt.to_period("M").nunique()
+        # Exclude fully reimbursed transactions from all calculations
+        active_df = df[~df["reimbursement_status"].isin(["full_rule", "full_oneoff"])].copy()
+        active_df["amount"] = active_df["effective_amount"]
 
-        # --- APPLY ERSTATTUNGSREGELN ---
-        rules = load_rules()
-        active_rules = [r for r in rules if r["active"]]
-        summaries = apply_rules(df, all_transactions) if active_rules else []
+        num_months = active_df["date"].dt.to_period("M").nunique()
+        if num_months == 0:
+            num_months = 1
 
-        # Build deduction map: subcategory -> total deducted per month
-        deduction_map = {}
-        total_monthly_deduction = 0.0
-        for s in summaries:
-            for d in s["deductions"]:
-                sub = d["subcategory"]
-                monthly = round(d["deducted"] / num_months, 2) if d["type"] == "percent" else d["deducted"]
-                deduction_map[sub] = deduction_map.get(sub, 0) + monthly
-                total_monthly_deduction += monthly
-        total_monthly_deduction = round(total_monthly_deduction, 2)
-
-        # Raw averages
-        raw_avg_einnahmen = df[df["type"] == "Einnahme"]["amount"].sum() / num_months
-        raw_avg_ausgaben = abs(df[df["type"] == "Ausgabe"]["amount"].sum()) / num_months
-
-        # Adjusted averages
-        adj_avg_ausgaben = round(raw_avg_ausgaben - total_monthly_deduction, 2)
-        adj_avg_einnahmen = round(raw_avg_einnahmen, 2)
-        adj_avg_differenz = round(adj_avg_einnahmen - adj_avg_ausgaben, 2)
+        avg_einnahmen = active_df[active_df["type"] == "Einnahme"]["amount"].sum() / num_months
+        avg_ausgaben = abs(active_df[active_df["type"] == "Ausgabe"]["amount"].sum()) / num_months
+        avg_differenz = avg_einnahmen - avg_ausgaben
 
         col1, col2, col3 = st.columns(3)
         with col1:
-            st.metric("💚 Ø Einnahmen / Monat", f"{adj_avg_einnahmen:.2f}€")
+            st.metric("💚 Ø Einnahmen / Monat", f"{avg_einnahmen:.2f}€")
         with col2:
-            st.metric(
-                "🔴 Ø Ausgaben / Monat",
-                f"{adj_avg_ausgaben:.2f}€",
-                delta=f"-{total_monthly_deduction:.2f}€ Erstattung",
-                delta_color="off"
-            )
+            st.metric("🔴 Ø Ausgaben / Monat", f"{avg_ausgaben:.2f}€")
         with col3:
-            st.metric("💰 Ø Differenz / Monat", f"{adj_avg_differenz:.2f}€",
-                      delta=f"{adj_avg_differenz:.2f}€")
+            st.metric("💰 Ø Differenz / Monat", f"{avg_differenz:.2f}€",
+                      delta=f"{avg_differenz:.2f}€")
 
         st.markdown("---")
 
-        # --- CATEGORY AVERAGES (with deductions applied) ---
+        # --- CATEGORY AVERAGES ---
         st.subheader("📂 Ø Ausgaben pro Kategorie / Monat")
-        ausgaben_df = df[df["type"] == "Ausgabe"].copy()
+        ausgaben_df = active_df[active_df["type"] == "Ausgabe"].copy()
 
         top_cat_avg = (
             ausgaben_df.groupby("top_category")["amount"]
@@ -171,7 +151,7 @@ with tab1:
 
         st.markdown("---")
 
-        # --- SUBCATEGORY AVERAGES (with deductions applied) ---
+        # --- SUBCATEGORY AVERAGES ---
         st.subheader("🔍 Unterkategorien")
         for top_cat in top_cats:
             sub_df = ausgaben_df[ausgaben_df["top_category"] == top_cat]
@@ -180,56 +160,48 @@ with tab1:
                 .sum().abs() / num_months
             ).round(2).sort_values(ascending=False)
 
-            # Calculate adjusted total for this top category
-            adj_top_total = sum(
-                round(val - deduction_map.get(sub, 0), 2)
-                for sub, val in sub_avg.items()
-            )
+            adj_top_total = sub_avg.sum()
 
             with st.expander(f"📁 {top_cat} — Ø {adj_top_total:.2f}€ / Monat"):
                 if not sub_avg.empty:
                     sub_cols = st.columns(min(len(sub_avg), 3))
                     for i, (sub, val) in enumerate(sub_avg.items()):
-                        deduction = deduction_map.get(sub, 0)
-                        adj_val = round(val - deduction, 2)
                         with sub_cols[i % 3]:
-                            if deduction > 0:
-                                st.metric(
-                                    f"• {sub}",
-                                    f"{adj_val:.2f}€ / Monat",
-                                    delta=f"-{deduction:.2f}€ Erstattung",
-                                    delta_color="off"
-                                )
-                            else:
-                                st.metric(f"• {sub}", f"{adj_val:.2f}€ / Monat")
+                            st.metric(f"• {sub}", f"{val:.2f}€ / Monat")
 
         st.markdown("---")
 
-        # --- ERSTATTUNGSREGELN SUMMARY ---
-        if active_rules and summaries:
-            st.subheader("💸 Erstattungen & Abzüge")
-            for s in summaries:
-                st.markdown(f"**💰 {s['store']}** — Letzter Betrag: {s['erstattung_amount']:.2f}€")
-                cols = st.columns(len(s["deductions"]) + 1)
-                for i, d in enumerate(s["deductions"]):
-                    with cols[i]:
-                        label = f"↩️ {d['subcategory']}"
-                        detail = f"{d['value']}€ fix" if d["type"] == "fixed" else f"{d['value']}% der Ø Ausgabe"
-                        st.metric(label, f"-{d['deducted']:.2f}€", delta=detail, delta_color="off")
+        # --- REIMBURSEMENT RULES SUMMARY ---
+        from core.reimbursement_manager import load_reimbursement_rules
+        reimb_rules = load_reimbursement_rules()
+        active_rules = [r for r in reimb_rules if r["active"]]
+
+        if active_rules:
+            st.subheader("💸 Aktive Erstattungsregeln")
+            for rule in active_rules:
+                total = sum(d["amount"] for d in rule["deductions"])
+                cols = st.columns(len(rule["deductions"]) + 2)
+                with cols[0]:
+                    st.metric("💰 Store", rule["income_store"])
+                for i, d in enumerate(rule["deductions"]):
+                    with cols[i + 1]:
+                        st.metric(
+                            f"↩️ {d['sub_category']}",
+                            f"-{d['amount']:.2f}€",
+                            delta_color="off"
+                        )
                 with cols[-1]:
-                    remaining = s["remaining"]
-                    color = "normal" if remaining >= 0 else "inverse"
-                    st.metric("💰 Verbleibend", f"{remaining:.2f}€", delta_color=color)
-                st.markdown("---")
+                    st.metric("Gesamt Abzug", f"-{total:.2f}€", delta_color="off")
+            st.markdown("---")
 
         # --- CHARTS ---
         col1, col2 = st.columns(2)
         with col1:
-            st.plotly_chart(plot_by_category(df), width='stretch', key="dash_cat")
+            st.plotly_chart(plot_by_category(active_df), width='stretch', key="dash_cat")
         with col2:
-            st.plotly_chart(plot_pie_category(df), width='stretch', key="dash_pie")
+            st.plotly_chart(plot_pie_category(active_df), width='stretch', key="dash_pie")
 
-        st.plotly_chart(plot_over_time(df), width='stretch', key="dash_time")
+        st.plotly_chart(plot_over_time(active_df), width='stretch', key="dash_time")
         
 # ==========================================
 # TAB 2 — TRANSAKTIONEN
