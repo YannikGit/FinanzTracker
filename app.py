@@ -949,41 +949,65 @@ with tab5:
 
     st.markdown("---")
 
+    st.markdown("---")
+
     # --- ERSTATTUNGSREGELN ---
-    st.markdown("### 💸 Erstattungsregeln")
-    st.write("Definiere wiederkehrende Erstattungen und wie sie von deinen Ausgaben abgezogen werden.")
+    st.markdown("### 💸 Wiederkehrende Erstattungsregeln")
+    st.write("Definiere wiederkehrende Erstattungen — sie werden automatisch auf alle passenden Transaktionen angewendet.")
 
-    rules = load_rules()
+    from core.reimbursement_manager import (
+        load_reimbursement_rules, add_reimbursement_rule,
+        delete_reimbursement_rule, toggle_reimbursement_rule,
+        apply_reimbursement_rules
+    )
 
-    if rules:
+    reimb_rules = load_reimbursement_rules()
+
+    # Display existing rules
+    if reimb_rules:
         st.markdown("#### Aktuelle Regeln")
-        for rule in rules:
+        for rule in reimb_rules:
             status = "✅ Aktiv" if rule["active"] else "⏸️ Pausiert"
-            with st.expander(f"💸 {rule['store']} — {status}"):
+            total = sum(d["amount"] for d in rule["deductions"])
+            with st.expander(f"💸 {rule['income_store']} — {status} — {total:.2f}€ gesamt"):
                 for d in rule["deductions"]:
-                    if d["type"] == "fixed":
-                        st.write(f"  • {d['subcategory']}: {d['value']:.2f}€ (fix)")
-                    else:
-                        st.write(f"  • {d['subcategory']}: {d['value']}% der Ø Ausgabe")
-                col1, col2 = st.columns(2)
+                    st.write(f"  • {d['sub_category']}: {d['amount']:.2f}€")
+                col1, col2, col3 = st.columns(3)
                 with col1:
                     if st.button(
                         "⏸️ Pausieren" if rule["active"] else "▶️ Aktivieren",
-                        key=f"toggle_{rule['store']}"
+                        key=f"rtoggle_{rule['income_store']}"
                     ):
-                        toggle_rule(rule["store"])
+                        toggle_reimbursement_rule(rule["income_store"])
+                        apply_reimbursement_rules()
+                        st.success("Regel aktualisiert und neu angewendet!")
                         st.rerun()
                 with col2:
-                    if st.button("🗑️ Löschen", key=f"delete_rule_{rule['store']}"):
-                        delete_rule(rule["store"])
-                        st.success(f"Regel für '{rule['store']}' gelöscht.")
+                    if st.button("🔄 Neu anwenden", key=f"reapply_{rule['income_store']}"):
+                        apply_reimbursement_rules()
+                        st.success("Regeln neu angewendet!")
+                        st.rerun()
+                with col3:
+                    if st.button("🗑️ Löschen", key=f"rdelete_{rule['income_store']}"):
+                        delete_reimbursement_rule(rule["income_store"])
+                        apply_reimbursement_rules()
+                        st.success(f"Regel für '{rule['income_store']}' gelöscht.")
                         st.rerun()
     else:
         st.info("Noch keine Erstattungsregeln definiert.")
 
+    # Manual reapply button
+    if reimb_rules:
+        st.markdown("---")
+        if st.button("🔄 Alle Regeln neu anwenden", type="secondary"):
+            apply_reimbursement_rules()
+            st.success("Alle Regeln neu angewendet!")
+            st.rerun()
+
     st.markdown("---")
     st.markdown("#### ➕ Neue Erstattungsregel")
 
+    # Get all Einnahmen stores
     einnahmen_stores = sorted(list(set(
         t["store"] for t in all_transactions
         if t.get("top_category") == "Einnahmen"
@@ -995,65 +1019,70 @@ with tab5:
         key="rule_store"
     )
 
+    # Show latest amount
     latest = 0.0
     if rule_store and rule_store != "—":
+        from core.erstattung_manager import get_latest_erstattung_amount
         latest = get_latest_erstattung_amount(rule_store, all_transactions)
         st.info(f"💰 Letzter Betrag von **{rule_store}**: {latest:.2f}€")
 
-    st.markdown("**Abzüge definieren:**")
+    st.markdown("**Abzüge definieren** (welche Ausgaben werden erstattet?):")
 
-    if "deduction_rows" not in st.session_state:
-        st.session_state.deduction_rows = 1
+    if "reimb_rows" not in st.session_state:
+        st.session_state.reimb_rows = 1
 
     all_subcategories = sorted(list(set(
         sub for data in tree.values() for sub in data["subcategories"]
     )))
 
-    deductions = []
-    total_fixed = 0.0
+    new_deductions = []
+    total_deducted = 0.0
 
-    for i in range(st.session_state.deduction_rows):
+    for i in range(st.session_state.reimb_rows):
         st.markdown(f"**Abzug {i+1}**")
-        col1, col2, col3 = st.columns(3)
+        col1, col2 = st.columns(2)
         with col1:
-            sub = st.selectbox("Unterkategorie", options=all_subcategories, key=f"rule_sub_{i}")
-        with col2:
-            dtype = st.selectbox(
-                "Typ", options=["Fixer Betrag (€)", "Prozent der Ø Ausgabe (%)"],
-                key=f"rule_type_{i}"
+            sub = st.selectbox(
+                "Unterkategorie der Ausgabe",
+                options=all_subcategories,
+                key=f"reimb_sub_{i}"
             )
-        with col3:
-            if dtype == "Fixer Betrag (€)":
-                val = st.number_input("Betrag (€)", min_value=0.0, value=0.0, step=10.0, key=f"rule_val_{i}")
-                deductions.append({"subcategory": sub, "type": "fixed", "value": val})
-                total_fixed += val
-            else:
-                val = st.number_input("Prozent (%)", min_value=1, max_value=100, value=50, key=f"rule_val_{i}")
-                deductions.append({"subcategory": sub, "type": "percent", "value": val})
+        with col2:
+            amt = st.number_input(
+                "Betrag (€)",
+                min_value=0.01,
+                value=100.0,
+                step=10.0,
+                key=f"reimb_amt_{i}"
+            )
+        new_deductions.append({"sub_category": sub, "amount": amt})
+        total_deducted += amt
 
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("➕ Weiterer Abzug"):
-            st.session_state.deduction_rows += 1
+        if st.button("➕ Weiterer Abzug", key="add_reimb_row"):
+            st.session_state.reimb_rows += 1
             st.rerun()
     with col2:
-        if st.session_state.deduction_rows > 1:
-            if st.button("➖ Entfernen"):
-                st.session_state.deduction_rows -= 1
+        if st.session_state.reimb_rows > 1:
+            if st.button("➖ Entfernen", key="remove_reimb_row"):
+                st.session_state.reimb_rows -= 1
                 st.rerun()
 
+    # Preview
     if latest > 0:
-        remaining_preview = round(latest - total_fixed, 2)
-        if remaining_preview >= 0:
-            st.success(f"✅ Nach fixen Abzügen verbleiben: **{remaining_preview:.2f}€**")
+        remaining = round(latest - total_deducted, 2)
+        if remaining >= 0:
+            st.success(f"✅ Nach Abzügen verbleiben: **{remaining:.2f}€** der Erstattung")
         else:
-            st.error(f"⚠️ Abzüge übersteigen Erstattung um {abs(remaining_preview):.2f}€!")
+            st.error(f"⚠️ Abzüge übersteigen Erstattung um {abs(remaining):.2f}€!")
 
-    if st.button("💾 Regel speichern", type="primary"):
+    if st.button("💾 Regel speichern & anwenden", type="primary", key="save_reimb_rule"):
         if rule_store and rule_store != "—":
-            add_rule(rule_store, deductions)
-            st.session_state.deduction_rows = 1
-            st.success(f"Regel für '{rule_store}' gespeichert!")
+            add_reimbursement_rule(rule_store, new_deductions)
+            apply_reimbursement_rules()
+            st.session_state.reimb_rows = 1
+            st.success(f"Regel für '{rule_store}' gespeichert und angewendet!")
             st.rerun()
         else:
             st.error("Bitte einen Store auswählen.")
