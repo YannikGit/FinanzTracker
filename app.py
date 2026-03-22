@@ -253,6 +253,13 @@ with tab2:
             available_cats = sorted(df["top_category"].dropna().unique().tolist())
             selected_cat = st.selectbox("Kategorie", ["Alle"] + available_cats, key="t_cat")
 
+        # Show/hide reimbursed toggle
+        show_reimbursed = st.toggle(
+            "👻 Erstattete Transaktionen anzeigen",
+            value=True,
+            key="show_reimbursed"
+        )
+
         table_df = df.copy()
         if selected_year != "Alle":
             table_df = table_df[table_df["year"] == selected_year]
@@ -269,14 +276,16 @@ with tab2:
         sort_map = {"Datum": "date", "Betrag": "amount", "Store": "store", "Kategorie": "sub_category"}
         table_df = table_df.sort_values(sort_map[sort_by], ascending=False)
 
+        # Summary banner — uses effective amounts, excludes fully reimbursed
+        active_df = table_df[~table_df["reimbursement_status"].isin(["full_rule", "full_oneoff"])]
         st.markdown("---")
-        total_in_filtered = table_df[table_df["type"] == "Einnahme"]["amount"].sum()
-        total_out_filtered = abs(table_df[table_df["type"] == "Ausgabe"]["amount"].sum())
+        total_in_filtered = active_df[active_df["type"] == "Einnahme"]["effective_amount"].sum()
+        total_out_filtered = abs(active_df[active_df["type"] == "Ausgabe"]["effective_amount"].sum())
         total_diff_filtered = total_in_filtered - total_out_filtered
 
         col1, col2, col3, col4 = st.columns(4)
         with col1:
-            st.metric("🔢 Transaktionen", len(table_df))
+            st.metric("🔢 Transaktionen", len(active_df))
         with col2:
             st.metric("💚 Einnahmen", f"{total_in_filtered:.2f}€")
         with col3:
@@ -289,21 +298,78 @@ with tab2:
         edit_mode = st.toggle("✏️ Bearbeitungsmodus", value=False, key="edit_mode")
 
         if not edit_mode:
-            display_df = table_df[["date", "store", "amount", "top_category", "sub_category"]].copy()
-            display_df["date"] = display_df["date"].dt.strftime("%d.%m.%Y")
-            display_df["amount"] = display_df["amount"].round(2)
-            display_df.columns = ["Datum", "Store", "Betrag (€)", "Kategorie", "Unterkategorie"]
+            # Build display dataframe
+            display_rows = []
+            for _, row in table_df.iterrows():
+                status = row.get("reimbursement_status")
+                is_fully_reimbursed = status in ("full_rule", "full_oneoff")
+                is_partially_reimbursed = status in ("partial_rule", "partial_oneoff")
 
-            def color_amount(val):
-                return "color: green" if val > 0 else "color: red"
+                # Skip fully reimbursed if toggle is off
+                if is_fully_reimbursed and not show_reimbursed:
+                    continue
 
-            styled = (
-                display_df.style
-                .map(color_amount, subset=["Betrag (€)"])
-                .format({"Betrag (€)": "{:.2f}€"})
-            )
-            st.dataframe(styled, width='stretch', height=500)
+                # Format amount display
+                eff = row["effective_amount"]
+                orig = row["amount"]
 
+                if is_fully_reimbursed:
+                    amount_display = f"0.00€ ({orig:.2f}€)"
+                elif is_partially_reimbursed:
+                    amount_display = f"{eff:.2f}€ ({orig:.2f}€) ↓"
+                else:
+                    amount_display = f"{eff:.2f}€"
+
+                display_rows.append({
+                    "Datum": row["date"].strftime("%d.%m.%Y"),
+                    "Store": row["store"],
+                    "Betrag": amount_display,
+                    "Kategorie": row["top_category"],
+                    "Unterkategorie": row["sub_category"],
+                    "_status": status,
+                    "_amount": eff
+                })
+
+            display_df = pd.DataFrame(display_rows)
+
+            if display_df.empty:
+                st.info("Keine Transaktionen gefunden.")
+            else:
+                # Style the dataframe
+                # Style using helper columns, then display without them
+                def style_row(row):
+                    status = row["_status"]
+                    if status in ("full_rule", "full_oneoff"):
+                        return ["color: #aaaaaa; font-style: italic"] * len(row)
+                    elif status in ("partial_rule", "partial_oneoff"):
+                        color = "color: green" if row["_amount"] > 0 else "color: #cc6600"
+                        return [color if col == "Betrag" else "" for col in row.index]
+                    else:
+                        color = "color: green" if row["_amount"] > 0 else "color: red"
+                        return [color if col == "Betrag" else "" for col in row.index]
+
+                # Get styles as a list of dicts
+                styles = display_df.apply(style_row, axis=1).tolist()
+
+                # Create clean display df without helper columns
+                clean_df = display_df[["Datum", "Store", "Betrag", "Kategorie", "Unterkategorie"]].copy()
+
+                # Reapply styles to clean df
+                def style_clean_row(row):
+                    idx = row.name
+                    full_row = display_df.loc[idx]
+                    status = full_row["_status"]
+                    if status in ("full_rule", "full_oneoff"):
+                        return ["color: #aaaaaa; font-style: italic"] * len(row)
+                    elif status in ("partial_rule", "partial_oneoff"):
+                        color = "color: green" if full_row["_amount"] > 0 else "color: #cc6600"
+                        return [color if col == "Betrag" else "" for col in row.index]
+                    else:
+                        color = "color: green" if full_row["_amount"] > 0 else "color: red"
+                        return [color if col == "Betrag" else "" for col in row.index]
+
+                styled = clean_df.style.apply(style_clean_row, axis=1)
+                st.dataframe(styled, width='stretch', height=500)
         else:
             st.info("✏️ Bearbeitungsmodus aktiv — bearbeite Transaktionen direkt in der Tabelle.")
 
@@ -374,12 +440,129 @@ with tab2:
                 if to_delete_count > 0:
                     st.warning(f"⚠️ {to_delete_count} Transaktion(en) zum Löschen markiert.")
 
+        # --- ONE-OFF REIMBURSEMENT LINKING ---
+        st.markdown("---")
+        st.markdown("### 🔗 Einmalige Erstattung verknüpfen")
+        st.write("Verknüpfe eine Einnahme mit einer Ausgabe als einmalige Erstattung.")
+
+        from core.reimbursement_manager import link_one_off_reimbursement, unlink_reimbursement
+        from core.models import make_id
+
+        # Get all income transactions
+        income_transactions = [
+            t for t in all_transactions
+            if t["amount"] > 0
+            and t.get("reimbursement_status") is None
+        ]
+        expense_transactions = [
+            t for t in all_transactions
+            if t["amount"] < 0
+            and t.get("reimbursement_status") is None
+        ]
+
+        if not income_transactions or not expense_transactions:
+            st.info("Keine unverstatteten Transaktionen verfügbar.")
+        else:
+            col1, col2 = st.columns(2)
+            with col1:
+                income_options = {
+                    f"{t['store']} | +{t['amount']:.2f}€ | {t['date']}": make_id(t)
+                    for t in sorted(income_transactions, key=lambda x: x["date"], reverse=True)
+                }
+                selected_income = st.selectbox(
+                    "💚 Einnahme (Erstattung)",
+                    options=list(income_options.keys()),
+                    key="oneoff_income"
+                )
+
+            with col2:
+                expense_options = {
+                    f"{t['store']} | {t['amount']:.2f}€ | {t['date']}": make_id(t)
+                    for t in sorted(expense_transactions, key=lambda x: x["date"], reverse=True)
+                }
+                selected_expense = st.selectbox(
+                    "🔴 Ausgabe (erstattet)",
+                    options=list(expense_options.keys()),
+                    key="oneoff_expense"
+                )
+
+            # Get the selected income amount as default
+            selected_income_id = income_options[selected_income]
+            selected_income_t = next(
+                t for t in all_transactions if make_id(t) == selected_income_id
+            )
+            selected_expense_id = expense_options[selected_expense]
+            selected_expense_t = next(
+                t for t in all_transactions if make_id(t) == selected_expense_id
+            )
+
+            reimb_amount = st.number_input(
+                "Erstattungsbetrag (€)",
+                min_value=0.01,
+                max_value=float(abs(selected_expense_t["amount"])),
+                value=min(float(selected_income_t["amount"]),
+                         float(abs(selected_expense_t["amount"]))),
+                step=0.01,
+                key="oneoff_amount"
+            )
+
+            new_expense = round(abs(selected_expense_t["amount"]) - reimb_amount, 2)
+            remaining_income = round(selected_income_t["amount"] - reimb_amount, 2)
+
+            col1, col2 = st.columns(2)
+            with col1:
+                st.caption(f"Ausgabe nach Erstattung: **{new_expense:.2f}€**"
+                          f" {'(vollständig erstattet)' if new_expense == 0 else ''}")
+            with col2:
+                st.caption(f"Verbleibende Einnahme: **{remaining_income:.2f}€**"
+                          f" {'(vollständig verwendet)' if remaining_income == 0 else ''}")
+
+            if st.button("🔗 Verknüpfung erstellen", type="primary"):
+                success, msg = link_one_off_reimbursement(
+                    selected_income_id,
+                    selected_expense_id,
+                    reimb_amount
+                )
+                if success:
+                    st.success("✅ Verknüpfung erstellt!")
+                    st.rerun()
+                else:
+                    st.error(f"Fehler: {msg}")
+
+        # --- UNLINK REIMBURSEMENTS ---
+        st.markdown("---")
+        st.markdown("### 🔓 Erstattung aufheben")
+
+        linked_transactions = [
+            t for t in all_transactions
+            if t.get("reimbursement_status") is not None
+        ]
+
+        if not linked_transactions:
+            st.info("Keine verknüpften Erstattungen vorhanden.")
+        else:
+            unlink_options = {
+                f"{t['store']} | {t['amount']:.2f}€ | {t['date']} [{t.get('reimbursement_status')}]": make_id(t)
+                for t in linked_transactions
+            }
+            selected_unlink = st.selectbox(
+                "Verknüpfung aufheben",
+                options=list(unlink_options.keys()),
+                key="unlink_select"
+            )
+            if st.button("🔓 Verknüpfung aufheben"):
+                unlink_reimbursement(unlink_options[selected_unlink])
+                st.success("Verknüpfung aufgehoben!")
+                st.rerun()
+
+        # --- KASSENBON DETAILS ---
         st.markdown("---")
         st.markdown("### 🧾 Kassenbon Details")
 
         all_receipts = load_receipts()
         transactions_with_receipt = [
-            t for t in all_transactions if t.get("receipt_id") is not None
+            t for t in all_transactions
+            if t.get("receipt_id") is not None
         ]
 
         if not transactions_with_receipt:
