@@ -589,23 +589,27 @@ with tab3:
     else:
         st.subheader("📈 Analyse")
 
+        # Exclude fully reimbursed, use effective amounts
+        analyse_df = df[~df["reimbursement_status"].isin(["full_rule", "full_oneoff"])].copy()
+        analyse_df["amount"] = analyse_df["effective_amount"]
+
         st.markdown("### Filter")
         col1, col2, col3 = st.columns(3)
         with col1:
-            available_years = sorted(df["year"].unique().tolist())
+            available_years = sorted(analyse_df["year"].unique().tolist())
             selected_year = st.selectbox("Jahr", ["Alle"] + available_years, key="a_year")
         with col2:
-            available_months = sorted(df["month"].unique().tolist())
+            available_months = sorted(analyse_df["month"].unique().tolist())
             selected_month = st.selectbox(
                 "Monat", ["Alle"] + [month_names[m] for m in available_months], key="a_month"
             )
         with col3:
-            available_top_cats = sorted(df["top_category"].dropna().unique().tolist())
+            available_top_cats = sorted(analyse_df["top_category"].dropna().unique().tolist())
             selected_top_cats = st.multiselect(
                 "Kategorien", available_top_cats, default=available_top_cats, key="a_cats"
             )
 
-        filtered_df = df.copy()
+        filtered_df = analyse_df.copy()
         if selected_year != "Alle":
             filtered_df = filtered_df[filtered_df["year"] == selected_year]
         if selected_month != "Alle":
@@ -618,9 +622,15 @@ with tab3:
 
         col1, col2, col3, col4 = st.columns(4)
         with col1:
-            chart_type = st.selectbox("Diagrammtyp", ["Balken", "Linie", "Kreis", "Fläche"], key="a_chart_type")
+            chart_type = st.selectbox(
+                "Diagrammtyp", ["Balken", "Linie", "Kreis", "Fläche"],
+                key="a_chart_type"
+            )
         with col2:
-            transaction_type = st.selectbox("Transaktionstyp", ["Ausgaben", "Einnahmen", "Beides"], key="a_trans_type")
+            transaction_type = st.selectbox(
+                "Transaktionstyp", ["Ausgaben", "Einnahmen", "Beides"],
+                key="a_trans_type"
+            )
         with col3:
             group_by = st.selectbox(
                 "Gruppieren nach",
@@ -628,7 +638,9 @@ with tab3:
                 key="a_group_by"
             )
         with col4:
-            top_n = st.slider("Top N anzeigen", min_value=3, max_value=20, value=10, key="a_top_n")
+            top_n = st.slider(
+                "Top N anzeigen", min_value=3, max_value=20, value=10, key="a_top_n"
+            )
 
         chart_df = filtered_df.copy()
         if transaction_type == "Ausgaben":
@@ -671,10 +683,11 @@ with tab3:
                           title=f"{transaction_type} nach {group_by}")
 
         st.plotly_chart(fig, width='stretch', key="ana_dynamic")
+
         st.markdown("---")
         st.markdown("### Zusammenfassung")
         st.dataframe(grouped, width='stretch')
-
+        
 # ==========================================
 # TAB 4 — IMPORT
 # ==========================================
